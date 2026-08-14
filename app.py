@@ -15,15 +15,26 @@ st.set_page_config(
 )
 
 AMICS = [
-    "Tubert", "Miralles", "Magaña", "Hector", "Adri",
-    "Porsell", "Gugu", "Carbo", "Hicham", "Younes",
-    "Pablo", "Biel", "Isma"
+    "Tubert",
+    "Miralles",
+    "Magaña",
+    "Hector",
+    "Adri",
+    "Porsell",
+    "Gugu",
+    "Carbo",
+    "Hicham",
+    "Younes",
+    "Pablo",
+    "Biel",
+    "Isma"
 ]
 
-PUNTS_INICIALS = 100
+PUNTS_INICIALS = 100.0
 
-# Com més gran, més exagerada és la diferència.
-EXPONENT_RULETA = 2
+# Com més gran sigui aquest número,
+# més exagerada serà la diferència de probabilitats.
+EXPONENT_RULETA = 2.0
 
 
 # ============================================================
@@ -43,7 +54,41 @@ supabase = get_supabase()
 
 
 # ============================================================
-# AMICS
+# CREAR ELS 13 AMICS AUTOMÀTICAMENT
+# ============================================================
+
+def ensure_friends():
+
+    response = (
+        supabase
+        .table("friends")
+        .select("id,name")
+        .execute()
+    )
+
+    existing_names = {
+        row["name"]
+        for row in response.data
+    }
+
+    missing = [
+        {"name": name}
+        for name in AMICS
+        if name not in existing_names
+    ]
+
+    if missing:
+        supabase \
+            .table("friends") \
+            .insert(missing) \
+            .execute()
+
+
+ensure_friends()
+
+
+# ============================================================
+# OBTENIR AMICS
 # ============================================================
 
 def get_friends():
@@ -52,13 +97,19 @@ def get_friends():
         supabase
         .table("friends")
         .select("id,name")
-        .order("id")
         .execute()
     )
 
-    return [
-        (row["id"], row["name"])
+    # Ordenem segons l'ordre definit a AMICS
+    friend_dict = {
+        row["name"]: row["id"]
         for row in response.data
+    }
+
+    return [
+        (friend_dict[name], name)
+        for name in AMICS
+        if name in friend_dict
     ]
 
 
@@ -77,20 +128,22 @@ def get_friend_id(name):
 
 
 # ============================================================
-# VALOR DEL VIATGE
+# VALOR D'UN VIATGE
 # ============================================================
 
 def trip_value(num_passengers, party, round_trip):
 
-    if num_passengers == 0:
-        return 0
+    if num_passengers <= 0:
+        return 0.0
 
-    value = num_passengers
+    value = float(num_passengers)
 
+    # Festa = x2
     if party:
-
         value *= 2
 
+        # Només si és festa:
+        # anada + tornada = x2 addicional
         if round_trip:
             value *= 2
 
@@ -106,7 +159,7 @@ def calculate_points():
     friends = get_friends()
 
     points = {
-        friend_id: float(PUNTS_INICIALS)
+        friend_id: PUNTS_INICIALS
         for friend_id, _ in friends
     }
 
@@ -147,12 +200,16 @@ def calculate_points():
             trip["round_trip"]
         )
 
+        # Conductor guanya tot
         points[trip["driver_id"]] += total
 
+        # Cada passatger perd només x/n
         loss_each = total / n
 
         for passenger_id in passenger_ids:
-            points[passenger_id] -= loss_each
+
+            if passenger_id in points:
+                points[passenger_id] -= loss_each
 
     return points
 
@@ -174,7 +231,7 @@ def add_trip(
         supabase
         .table("trips")
         .insert({
-            "trip_date": trip_date,
+            "trip_date": str(trip_date),
             "driver_id": driver_id,
             "round_trip": round_trip,
             "party": party,
@@ -193,9 +250,14 @@ def add_trip(
         for passenger_id in passenger_ids
     ]
 
-    supabase.table(
-        "passengers"
-    ).insert(passengers).execute()
+    if passengers:
+
+        (
+            supabase
+            .table("passengers")
+            .insert(passengers)
+            .execute()
+        )
 
 
 # ============================================================
@@ -204,17 +266,21 @@ def add_trip(
 
 def delete_trip(trip_id):
 
-    supabase \
-        .table("passengers") \
-        .delete() \
-        .eq("trip_id", trip_id) \
+    (
+        supabase
+        .table("passengers")
+        .delete()
+        .eq("trip_id", trip_id)
         .execute()
+    )
 
-    supabase \
-        .table("trips") \
-        .delete() \
-        .eq("id", trip_id) \
+    (
+        supabase
+        .table("trips")
+        .delete()
+        .eq("id", trip_id)
         .execute()
+    )
 
 
 # ============================================================
@@ -254,16 +320,20 @@ def get_history():
         passenger_names = [
             friend_names[row["friend_id"]]
             for row in passenger_rows
+            if row["friend_id"] in friend_names
         ]
 
         result.append({
             "id": trip["id"],
             "date": trip["trip_date"],
-            "driver": friend_names[trip["driver_id"]],
+            "driver": friend_names.get(
+                trip["driver_id"],
+                "Desconegut"
+            ),
             "passengers": passenger_names,
             "round_trip": trip["round_trip"],
             "party": trip["party"],
-            "comment": trip["comment"]
+            "comment": trip["comment"] or ""
         })
 
     return result
@@ -276,10 +346,20 @@ def get_history():
 st.title("🚗 COTXE DE FESTA")
 
 st.caption(
-    "Punts, classificació i sorteig del conductor."
+    "Qui ha fet més cotxe? Qui té més punts? "
+    "Avui la ruleta decideix."
 )
 
 friends = get_friends()
+
+if len(friends) != len(AMICS):
+
+    st.error(
+        "No s'han pogut carregar tots els amics."
+    )
+
+    st.stop()
+
 points = calculate_points()
 
 
@@ -303,16 +383,23 @@ with tab1:
 
     st.header("🎰 Sorteig del conductor")
 
+    st.write(
+        "Selecciona **només les persones que van avui**. "
+        "La ruleta donarà menys probabilitat als que tenen "
+        "més punts."
+    )
+
     selected_names = st.multiselect(
-        "Selecciona qui està disponible avui:",
+        "Qui ve avui?",
         [name for _, name in friends],
-        default=[name for _, name in friends]
+        default=[]
     )
 
     if len(selected_names) < 2:
 
-        st.warning(
-            "Selecciona almenys 2 persones."
+        st.info(
+            "Selecciona almenys 2 persones per poder fer "
+            "el sorteig."
         )
 
     else:
@@ -329,22 +416,31 @@ with tab1:
                     "points": points[friend_id]
                 })
 
+        # ----------------------------------------------------
+        # PESOS
+        # Més punts = MENYS probabilitat
+        #
+        # p = 1 / punts^2
+        # ----------------------------------------------------
+
         weights = []
 
         for person in selected:
 
             p = max(
                 person["points"],
-                0.1
+                1.0
             )
 
-            weights.append(
-                1 / (p ** EXPONENT_RULETA)
+            weight = 1 / (
+                p ** EXPONENT_RULETA
             )
+
+            weights.append(weight)
 
         total_weight = sum(weights)
 
-        st.subheader("📊 Probabilitats")
+        st.subheader("🎯 Probabilitats")
 
         cols = st.columns(
             min(4, len(selected))
@@ -353,9 +449,9 @@ with tab1:
         for i, person in enumerate(selected):
 
             probability = (
-                weights[i] /
-                total_weight *
-                100
+                weights[i]
+                / total_weight
+                * 100
             )
 
             with cols[i % len(cols)]:
@@ -368,35 +464,58 @@ with tab1:
 
         st.divider()
 
+        # ----------------------------------------------------
+        # SORTEIG
+        # ----------------------------------------------------
+
         if st.button(
-            "🎰 SORTEJAR",
+            "🎰 SORTEJAR CONDUCTOR",
             type="primary",
             use_container_width=True
         ):
 
-            names = [
-                person["name"]
-                for person in selected
-            ]
-
-            winner = random.choices(
-                names,
+            winner_index = random.choices(
+                range(len(selected)),
                 weights=weights,
                 k=1
             )[0]
 
+            winner = selected[winner_index]["name"]
+
             st.session_state["winner"] = winner
+
+        # ----------------------------------------------------
+        # RESULTAT
+        # ----------------------------------------------------
 
         if "winner" in st.session_state:
 
             st.balloons()
 
-            st.success(
-                f"🚗 **{st.session_state['winner'].upper()} "
-                f"FA COTXE!**"
+            st.markdown(
+                f"""
+                <div style="
+                    text-align:center;
+                    padding:35px;
+                    border-radius:20px;
+                    background-color:#f0f2f6;
+                    margin-top:20px;
+                ">
+                    <h1>🚗</h1>
+                    <h2>FA COTXE...</h2>
+                    <h1>{st.session_state["winner"].upper()}</h1>
+                    <h3>🎉🎉🎉</h3>
+                </div>
+                """,
+                unsafe_allow_html=True
             )
 
-            if st.button("🔄 Tornar a sortejar"):
+            st.write("")
+
+            if st.button(
+                "🔄 Tornar a sortejar",
+                use_container_width=True
+            ):
 
                 del st.session_state["winner"]
 
@@ -416,17 +535,21 @@ with tab2:
     ]
 
     driver_name = st.selectbox(
-        "🚗 Conductor:",
-        names
+        "🚗 Conductor",
+        names,
+        key="add_driver"
     )
 
+    available_passengers = [
+        name
+        for name in names
+        if name != driver_name
+    ]
+
     passenger_names = st.multiselect(
-        "👥 Passatgers:",
-        [
-            name
-            for name in names
-            if name != driver_name
-        ]
+        "👥 Passatgers",
+        available_passengers,
+        key="add_passengers"
     )
 
     col1, col2 = st.columns(2)
@@ -434,41 +557,56 @@ with tab2:
     with col1:
 
         party = st.checkbox(
-            "🎉 Festa"
+            "🎉 Festa",
+            key="add_party"
         )
 
     with col2:
 
         round_trip = st.checkbox(
-            "🔄 Anada i tornada"
+            "🔄 Anada i tornada",
+            key="add_round_trip"
         )
 
     trip_date = st.date_input(
-        "📅 Data:",
-        date.today()
+        "📅 Data",
+        date.today(),
+        key="add_date"
     )
 
     comment = st.text_area(
-        "💬 Comentari (opcional)"
+        "💬 Comentari (opcional)",
+        key="add_comment"
     )
 
-    value = trip_value(
-        len(passenger_names),
-        party,
-        round_trip
-    )
+    # --------------------------------------------------------
+    # INFORMACIÓ DE PUNTS
+    # --------------------------------------------------------
 
     if passenger_names:
 
-        loss = value / len(passenger_names)
+        value = trip_value(
+            len(passenger_names),
+            party,
+            round_trip
+        )
+
+        loss = (
+            value
+            / len(passenger_names)
+        )
 
         st.info(
-            f"🚗 {driver_name}: **+{value:.1f} punts**\n\n"
+            f"🚗 **{driver_name}: +{value:.1f} punts**\n\n"
             f"👥 Cada passatger: **-{loss:.1f} punts**"
         )
 
+    # --------------------------------------------------------
+    # BOTÓ
+    # --------------------------------------------------------
+
     if st.button(
-        "💾 CONTINUAR",
+        "➡️ CONTINUAR",
         type="primary",
         use_container_width=True
     ):
@@ -476,124 +614,146 @@ with tab2:
         if not passenger_names:
 
             st.error(
-                "Selecciona almenys un passatger."
+                "Has de seleccionar almenys un passatger."
             )
 
         else:
 
-            st.session_state["confirm_add"] = True
+            st.session_state[
+                "pending_trip"
+            ] = {
+                "driver_name": driver_name,
+                "passenger_names": passenger_names,
+                "party": party,
+                "round_trip": round_trip,
+                "trip_date": trip_date,
+                "comment": comment
+            }
 
+            st.rerun()
 
-    if st.session_state.get(
-        "confirm_add",
-        False
-    ):
+    # --------------------------------------------------------
+    # CONFIRMACIÓ
+    # --------------------------------------------------------
 
-        @st.dialog("⚠️ Confirmar viatge")
-        def confirm_add():
+    if "pending_trip" in st.session_state:
+
+        pending = st.session_state[
+            "pending_trip"
+        ]
+
+        st.divider()
+
+        st.warning(
+            "⚠️ **CONFIRMA EL VIATGE**"
+        )
+
+        st.write(
+            f"🚗 **Conductor:** "
+            f"{pending['driver_name']}"
+        )
+
+        st.write(
+            f"👥 **Passatgers:** "
+            f"{', '.join(pending['passenger_names'])}"
+        )
+
+        st.write(
+            f"📅 **Data:** "
+            f"{pending['trip_date'].strftime('%d/%m/%Y')}"
+        )
+
+        st.write(
+            f"🎉 **Festa:** "
+            f"{'Sí' if pending['party'] else 'No'}"
+        )
+
+        st.write(
+            f"🔄 **Anada i tornada:** "
+            f"{'Sí' if pending['round_trip'] else 'No'}"
+        )
+
+        if pending["comment"].strip():
 
             st.write(
-                "Estàs segur que vols afegir aquest viatge?"
+                f"💬 **Comentari:** "
+                f"{pending['comment']}"
             )
 
-            st.divider()
+        value = trip_value(
+            len(pending["passenger_names"]),
+            pending["party"],
+            pending["round_trip"]
+        )
 
-            st.write(
-                f"🚗 **Conductor:** {driver_name}"
-            )
+        loss = (
+            value
+            / len(pending["passenger_names"])
+        )
 
-            st.write(
-                f"👥 **Passatgers:** "
-                f"{', '.join(passenger_names)}"
-            )
+        st.success(
+            f"🚗 {pending['driver_name']} "
+            f"guanya **+{value:.1f} punts**"
+        )
 
-            st.write(
-                f"📅 **Data:** "
-                f"{trip_date.strftime('%d/%m/%Y')}"
-            )
+        st.warning(
+            f"👥 Cada passatger perd "
+            f"**-{loss:.1f} punts**"
+        )
 
-            st.write(
-                f"🎉 **Festa:** "
-                f"{'Sí' if party else 'No'}"
-            )
+        col1, col2 = st.columns(2)
 
-            st.write(
-                f"🔄 **Anada i tornada:** "
-                f"{'Sí' if round_trip else 'No'}"
-            )
+        with col1:
 
-            if comment.strip():
+            if st.button(
+                "❌ CANCEL·LAR",
+                use_container_width=True
+            ):
 
-                st.write(
-                    f"💬 **Comentari:** {comment}"
+                del st.session_state[
+                    "pending_trip"
+                ]
+
+                st.rerun()
+
+        with col2:
+
+            if st.button(
+                "✅ CONFIRMAR VIATGE",
+                type="primary",
+                use_container_width=True
+            ):
+
+                driver_id = get_friend_id(
+                    pending["driver_name"]
                 )
 
-            st.divider()
+                passenger_ids = [
+                    get_friend_id(name)
+                    for name in pending["passenger_names"]
+                ]
 
-            loss = value / len(passenger_names)
+                add_trip(
+                    pending["trip_date"],
+                    driver_id,
+                    passenger_ids,
+                    pending["round_trip"],
+                    pending["party"],
+                    pending["comment"].strip()
+                )
 
-            st.success(
-                f"🚗 {driver_name}: +{value:.1f}"
-            )
+                del st.session_state[
+                    "pending_trip"
+                ]
 
-            st.warning(
-                f"👥 Cada passatger: -{loss:.1f}"
-            )
+                st.session_state[
+                    "trip_added"
+                ] = True
 
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                if st.button(
-                    "❌ Cancel·lar"
-                ):
-
-                    st.session_state[
-                        "confirm_add"
-                    ] = False
-
-                    st.rerun()
-
-            with col2:
-
-                if st.button(
-                    "✅ CONFIRMAR",
-                    type="primary"
-                ):
-
-                    driver_id = get_friend_id(
-                        driver_name
-                    )
-
-                    passenger_ids = [
-                        get_friend_id(name)
-                        for name in passenger_names
-                    ]
-
-                    add_trip(
-                        str(trip_date),
-                        driver_id,
-                        passenger_ids,
-                        round_trip,
-                        party,
-                        comment.strip()
-                    )
-
-                    st.session_state[
-                        "confirm_add"
-                    ] = False
-
-                    st.session_state[
-                        "added"
-                    ] = True
-
-                    st.rerun()
-
-        confirm_add()
-
+                st.rerun()
 
     if st.session_state.pop(
-        "added",
+        "trip_added",
         False
     ):
 
@@ -624,6 +784,44 @@ with tab3:
         reverse=True
     )
 
+    # --------------------------------------------------------
+    # PODI
+    # --------------------------------------------------------
+
+    if len(ranking) >= 3:
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "🥈 2n",
+                ranking[1]["name"],
+                f"{ranking[1]['points']:.1f} punts"
+            )
+
+        with col2:
+
+            st.metric(
+                "🥇 1r",
+                ranking[0]["name"],
+                f"{ranking[0]['points']:.1f} punts"
+            )
+
+        with col3:
+
+            st.metric(
+                "🥉 3r",
+                ranking[2]["name"],
+                f"{ranking[2]['points']:.1f} punts"
+            )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # CLASSIFICACIÓ COMPLETA
+    # --------------------------------------------------------
+
     for i, person in enumerate(ranking):
 
         if i == 0:
@@ -633,10 +831,20 @@ with tab3:
         elif i == 2:
             medal = "🥉"
         else:
-            medal = f"{i + 1}."
+            medal = f"**{i + 1}.**"
 
         st.markdown(
             f"### {medal} {person['name']}"
+        )
+
+        st.progress(
+            max(
+                0.0,
+                min(
+                    person["points"] / 200,
+                    1.0
+                )
+            )
         )
 
         st.write(
@@ -650,20 +858,21 @@ with tab3:
 
 with tab4:
 
-    st.header("📜 Historial")
+    st.header("📜 Historial de viatges")
 
     history = get_history()
 
     if not history:
 
         st.info(
-            "Encara no hi ha viatges."
+            "Encara no hi ha cap viatge registrat."
         )
 
     for trip in history:
 
         st.markdown(
-            f"### 🚗 {trip['driver']} — {trip['date']}"
+            f"### 🚗 {trip['driver']} "
+            f"— {trip['date']}"
         )
 
         st.write(
@@ -680,7 +889,10 @@ with tab4:
             extras.append("🔄 Anada i tornada")
 
         if extras:
-            st.write(" · ".join(extras))
+
+            st.write(
+                " · ".join(extras)
+            )
 
         value = trip_value(
             len(trip["passengers"]),
@@ -689,92 +901,104 @@ with tab4:
         )
 
         loss = (
-            value / len(trip["passengers"])
+            value
+            / len(trip["passengers"])
             if trip["passengers"]
             else 0
         )
 
         st.write(
-            f"💰 Conductor +{value:.1f} · "
-            f"Passatgers -{loss:.1f} cadascun"
+            f"💰 Conductor: **+{value:.1f}** "
+            f"· Passatgers: **-{loss:.1f} cadascun**"
         )
 
         if trip["comment"]:
+
             st.caption(
                 f"💬 {trip['comment']}"
             )
 
+        st.divider()
+
+        # ----------------------------------------------------
+        # ELIMINAR
+        # ----------------------------------------------------
+
         if st.button(
-            "🗑️ ELIMINAR",
-            key=f"delete_{trip['id']}"
+            "🗑️ ELIMINAR VIATGE",
+            key=f"delete_button_{trip['id']}",
+            use_container_width=True
         ):
 
             st.session_state[
-                "delete_id"
+                "pending_delete"
             ] = trip["id"]
 
             st.rerun()
 
+        # ----------------------------------------------------
+        # CONFIRMACIÓ ELIMINACIÓ
+        # ----------------------------------------------------
 
         if st.session_state.get(
-            "delete_id"
+            "pending_delete"
         ) == trip["id"]:
 
-            @st.dialog("⚠️ Eliminar viatge")
-            def confirm_delete():
+            st.warning(
+                "⚠️ **ESTÀS SEGUR QUE VOLS "
+                "ELIMINAR AQUEST VIATGE?**"
+            )
 
-                st.warning(
-                    "Estàs segur que vols eliminar aquest viatge?"
-                )
+            st.write(
+                "Els punts de tots els afectats "
+                "es recalcularan automàticament."
+            )
 
-                st.write(
-                    "Els punts es recalcularan "
-                    "automàticament."
-                )
+            col1, col2 = st.columns(2)
 
-                col1, col2 = st.columns(2)
+            with col1:
 
-                with col1:
+                if st.button(
+                    "❌ CANCEL·LAR",
+                    key=f"cancel_delete_{trip['id']}",
+                    use_container_width=True
+                ):
 
-                    if st.button("❌ Cancel·lar"):
+                    del st.session_state[
+                        "pending_delete"
+                    ]
 
-                        del st.session_state[
-                            "delete_id"
-                        ]
+                    st.rerun()
 
-                        st.rerun()
+            with col2:
 
-                with col2:
+                if st.button(
+                    "🗑️ SÍ, ELIMINAR",
+                    key=f"confirm_delete_{trip['id']}",
+                    type="primary",
+                    use_container_width=True
+                ):
 
-                    if st.button(
-                        "🗑️ ELIMINAR",
-                        type="primary"
-                    ):
+                    delete_trip(
+                        trip["id"]
+                    )
 
-                        delete_trip(
-                            trip["id"]
-                        )
+                    del st.session_state[
+                        "pending_delete"
+                    ]
 
-                        del st.session_state[
-                            "delete_id"
-                        ]
+                    st.session_state[
+                        "trip_deleted"
+                    ] = True
 
-                        st.session_state[
-                            "deleted"
-                        ] = True
-
-                        st.rerun()
-
-            confirm_delete()
-
-        st.divider()
+                    st.rerun()
 
 
     if st.session_state.pop(
-        "deleted",
+        "trip_deleted",
         False
     ):
 
         st.success(
-            "✅ VIATGE ELIMINAT!"
+            "✅ VIATGE ELIMINAT CORRECTAMENT!"
         )
