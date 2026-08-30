@@ -217,8 +217,7 @@ def calculate_points():
             continue
 
         # ----------------------------------------------------
-        # Si el viatge té punts personalitzats,
-        # aquests prevalen.
+        # PUNTS PERSONALITZATS
         # ----------------------------------------------------
 
         custom_points = trip.get(
@@ -238,6 +237,10 @@ def calculate_points():
                 points_per_passenger * n
             )
 
+        # ----------------------------------------------------
+        # PUNTS PER DEFECTE
+        # ----------------------------------------------------
+
         else:
 
             total = trip_value_default(
@@ -246,10 +249,14 @@ def calculate_points():
                 trip["round_trip"]
             )
 
-        # Conductor guanya el total
+        # ----------------------------------------------------
+        # TRANSFERÈNCIA
+        # ----------------------------------------------------
+
+        # El conductor rep el total
         points[trip["driver_id"]] += total
 
-        # Cada passatger perd x/n
+        # Cada passatger paga només x/n
         loss_each = total / n
 
         for passenger_id in passenger_ids:
@@ -309,6 +316,7 @@ def add_trip(
     }
 
     if custom_points is not None:
+
         trip_data[
             "custom_points_per_passenger"
         ] = custom_points
@@ -565,7 +573,8 @@ with tab1:
     selected_names = st.multiselect(
         "Qui ve avui?",
         [name for _, name in friends],
-        default=[]
+        default=[],
+        key="draw_people"
     )
 
     if len(selected_names) < 2:
@@ -638,7 +647,8 @@ with tab1:
         if st.button(
             "🎰 SORTEJAR CONDUCTOR",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
+            key="draw_driver_button"
         ):
 
             winner_index = random.choices(
@@ -681,7 +691,8 @@ with tab1:
 
             if st.button(
                 "🔄 Tornar a sortejar",
-                use_container_width=True
+                use_container_width=True,
+                key="redraw_driver_button"
             ):
 
                 del st.session_state[
@@ -738,7 +749,7 @@ with tab2:
         )
 
     # --------------------------------------------------------
-    # NOU: PUNTS PERSONALITZATS
+    # PUNTS PERSONALITZATS
     # --------------------------------------------------------
 
     custom_mode = st.selectbox(
@@ -826,9 +837,10 @@ with tab2:
     # --------------------------------------------------------
 
     if st.button(
-        "➡️ CONTINUAR",
+        "➡️ CONTINUAR VIATGE",
         type="primary",
-        use_container_width=True
+        use_container_width=True,
+        key="continue_trip"
     ):
 
         if not passenger_names:
@@ -960,6 +972,7 @@ with tab2:
 
             if st.button(
                 "❌ CANCEL·LAR",
+                key="cancel_pending_trip",
                 use_container_width=True
             ):
 
@@ -974,6 +987,7 @@ with tab2:
             if st.button(
                 "✅ CONFIRMAR VIATGE",
                 type="primary",
+                key="confirm_pending_trip",
                 use_container_width=True
             ):
 
@@ -1078,10 +1092,15 @@ with tab3:
         f"**{to_name}**"
     )
 
+    # --------------------------------------------------------
+    # CONTINUAR TRADEO
+    # --------------------------------------------------------
+
     if st.button(
-        "➡️ CONTINUAR",
+        "➡️ CONTINUAR TRADEO",
         type="primary",
-        use_container_width=True
+        use_container_width=True,
+        key="continue_transfer"
     ):
 
         if transfer_points <= 0:
@@ -1105,7 +1124,7 @@ with tab3:
             st.rerun()
 
     # --------------------------------------------------------
-    # CONFIRMACIÓ
+    # CONFIRMACIÓ TRADEO
     # --------------------------------------------------------
 
     if "pending_transfer" in st.session_state:
@@ -1311,7 +1330,8 @@ with tab5:
             "🚗 Viatges",
             "💸 Tradeos"
         ],
-        horizontal=True
+        horizontal=True,
+        key="history_type"
     )
 
     # ========================================================
