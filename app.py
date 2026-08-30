@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import random
 from datetime import date
@@ -32,8 +33,8 @@ AMICS = [
 
 PUNTS_INICIALS = 100.0
 
-# Com més gran sigui aquest número,
-# més exagerada serà la diferència de probabilitats.
+# Com més alt, més exagerada és la diferència
+# de probabilitats de la ruleta.
 EXPONENT_RULETA = 2.0
 
 
@@ -54,7 +55,7 @@ supabase = get_supabase()
 
 
 # ============================================================
-# CREAR ELS 13 AMICS AUTOMÀTICAMENT
+# AMICS
 # ============================================================
 
 def ensure_friends():
@@ -87,10 +88,6 @@ def ensure_friends():
 ensure_friends()
 
 
-# ============================================================
-# OBTENIR AMICS
-# ============================================================
-
 def get_friends():
 
     response = (
@@ -100,7 +97,6 @@ def get_friends():
         .execute()
     )
 
-    # Ordenem segons l'ordre definit a AMICS
     friend_dict = {
         row["name"]: row["id"]
         for row in response.data
@@ -128,10 +124,14 @@ def get_friend_id(name):
 
 
 # ============================================================
-# VALOR D'UN VIATGE
+# CÀLCUL DEL VALOR D'UN VIATGE
 # ============================================================
 
-def trip_value(num_passengers, party, round_trip):
+def trip_value_default(
+    num_passengers,
+    party,
+    round_trip
+):
 
     if num_passengers <= 0:
         return 0.0
@@ -140,14 +140,51 @@ def trip_value(num_passengers, party, round_trip):
 
     # Festa = x2
     if party:
+
         value *= 2
 
-        # Només si és festa:
-        # anada + tornada = x2 addicional
+        # Anada i tornada només té efecte
+        # si és festa
         if round_trip:
             value *= 2
 
     return value
+
+
+# ============================================================
+# OBTENIR TOTS ELS VIATGES
+# ============================================================
+
+def get_trips():
+
+    return (
+        supabase
+        .table("trips")
+        .select("*")
+        .order("trip_date")
+        .order("id")
+        .execute()
+    ).data
+
+
+# ============================================================
+# OBTENIR PASSATGERS D'UN VIATGE
+# ============================================================
+
+def get_passenger_ids(trip_id):
+
+    response = (
+        supabase
+        .table("passengers")
+        .select("friend_id")
+        .eq("trip_id", trip_id)
+        .execute()
+    )
+
+    return [
+        row["friend_id"]
+        for row in response.data
+    ]
 
 
 # ============================================================
@@ -163,53 +200,89 @@ def calculate_points():
         for friend_id, _ in friends
     }
 
-    trips_response = (
-        supabase
-        .table("trips")
-        .select("*")
-        .order("trip_date")
-        .order("id")
-        .execute()
-    )
+    # --------------------------------------------------------
+    # VIATGES
+    # --------------------------------------------------------
 
-    trips = trips_response.data
+    trips = get_trips()
 
     for trip in trips:
 
-        passengers_response = (
-            supabase
-            .table("passengers")
-            .select("friend_id")
-            .eq("trip_id", trip["id"])
-            .execute()
+        passenger_ids = get_passenger_ids(
+            trip["id"]
         )
-
-        passenger_ids = [
-            row["friend_id"]
-            for row in passengers_response.data
-        ]
 
         n = len(passenger_ids)
 
         if n == 0:
             continue
 
-        total = trip_value(
-            n,
-            trip["party"],
-            trip["round_trip"]
+        # ----------------------------------------------------
+        # Si el viatge té punts personalitzats,
+        # aquests prevalen.
+        # ----------------------------------------------------
+
+        custom_points = trip.get(
+            "custom_points_per_passenger"
         )
 
-        # Conductor guanya tot
+        if custom_points is not None:
+
+            try:
+                points_per_passenger = float(
+                    custom_points
+                )
+            except:
+                points_per_passenger = 0.0
+
+            total = (
+                points_per_passenger * n
+            )
+
+        else:
+
+            total = trip_value_default(
+                n,
+                trip["party"],
+                trip["round_trip"]
+            )
+
+        # Conductor guanya el total
         points[trip["driver_id"]] += total
 
-        # Cada passatger perd només x/n
+        # Cada passatger perd x/n
         loss_each = total / n
 
         for passenger_id in passenger_ids:
 
             if passenger_id in points:
+
                 points[passenger_id] -= loss_each
+
+    # --------------------------------------------------------
+    # TRADEOS DE PUNTS
+    # --------------------------------------------------------
+
+    transfers = (
+        supabase
+        .table("point_transfers")
+        .select("*")
+        .order("transfer_date")
+        .order("id")
+        .execute()
+    ).data
+
+    for transfer in transfers:
+
+        from_id = transfer["from_friend_id"]
+        to_id = transfer["to_friend_id"]
+        amount = float(transfer["points"])
+
+        if from_id in points:
+            points[from_id] -= amount
+
+        if to_id in points:
+            points[to_id] += amount
 
     return points
 
@@ -224,19 +297,27 @@ def add_trip(
     passenger_ids,
     round_trip,
     party,
-    comment
+    comment,
+    custom_points
 ):
+
+    trip_data = {
+        "trip_date": str(trip_date),
+        "driver_id": driver_id,
+        "round_trip": round_trip,
+        "party": party,
+        "comment": comment
+    }
+
+    if custom_points is not None:
+        trip_data[
+            "custom_points_per_passenger"
+        ] = custom_points
 
     trip_response = (
         supabase
         .table("trips")
-        .insert({
-            "trip_date": str(trip_date),
-            "driver_id": driver_id,
-            "round_trip": round_trip,
-            "party": party,
-            "comment": comment
-        })
+        .insert(trip_data)
         .execute()
     )
 
@@ -284,10 +365,53 @@ def delete_trip(trip_id):
 
 
 # ============================================================
-# HISTORIAL
+# AFEGIR TRADEO
 # ============================================================
 
-def get_history():
+def add_transfer(
+    from_id,
+    to_id,
+    points,
+    transfer_date,
+    comment
+):
+
+    (
+        supabase
+        .table("point_transfers")
+        .insert({
+            "from_friend_id": from_id,
+            "to_friend_id": to_id,
+            "points": points,
+            "transfer_date": str(
+                transfer_date
+            ),
+            "comment": comment
+        })
+        .execute()
+    )
+
+
+# ============================================================
+# ELIMINAR TRADEO
+# ============================================================
+
+def delete_transfer(transfer_id):
+
+    (
+        supabase
+        .table("point_transfers")
+        .delete()
+        .eq("id", transfer_id)
+        .execute()
+    )
+
+
+# ============================================================
+# HISTORIAL DE VIATGES
+# ============================================================
+
+def get_trip_history():
 
     trips = (
         supabase
@@ -333,7 +457,56 @@ def get_history():
             "passengers": passenger_names,
             "round_trip": trip["round_trip"],
             "party": trip["party"],
-            "comment": trip["comment"] or ""
+            "comment": trip["comment"] or "",
+            "custom_points": trip.get(
+                "custom_points_per_passenger"
+            )
+        })
+
+    return result
+
+
+# ============================================================
+# HISTORIAL DE TRADEOS
+# ============================================================
+
+def get_transfer_history():
+
+    transfers = (
+        supabase
+        .table("point_transfers")
+        .select("*")
+        .order("transfer_date", desc=True)
+        .order("id", desc=True)
+        .execute()
+    ).data
+
+    friends = get_friends()
+
+    friend_names = {
+        friend_id: name
+        for friend_id, name in friends
+    }
+
+    result = []
+
+    for transfer in transfers:
+
+        result.append({
+            "id": transfer["id"],
+            "date": transfer["transfer_date"],
+            "from": friend_names.get(
+                transfer["from_friend_id"],
+                "Desconegut"
+            ),
+            "to": friend_names.get(
+                transfer["to_friend_id"],
+                "Desconegut"
+            ),
+            "points": float(
+                transfer["points"]
+            ),
+            "comment": transfer["comment"] or ""
         })
 
     return result
@@ -346,8 +519,8 @@ def get_history():
 st.title("🚗 COTXE DE FESTA")
 
 st.caption(
-    "Qui ha fet més cotxe? Qui té més punts? "
-    "Avui la ruleta decideix."
+    "Punts, viatges i sorteigs. "
+    "Que la ruleta decideixi qui condueix."
 )
 
 friends = get_friends()
@@ -367,9 +540,10 @@ points = calculate_points()
 # TABS
 # ============================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🎰 SORTEIG",
     "📝 AFEGIR VIATGE",
+    "💸 TRADEO DE PUNTS",
     "🏆 CLASSIFICACIÓ",
     "📜 HISTORIAL"
 ])
@@ -384,9 +558,9 @@ with tab1:
     st.header("🎰 Sorteig del conductor")
 
     st.write(
-        "Selecciona **només les persones que van avui**. "
-        "La ruleta donarà menys probabilitat als que tenen "
-        "més punts."
+        "Selecciona qui surt avui. "
+        "Els que tenen més punts tenen menys "
+        "probabilitats de fer cotxe."
     )
 
     selected_names = st.multiselect(
@@ -398,8 +572,7 @@ with tab1:
     if len(selected_names) < 2:
 
         st.info(
-            "Selecciona almenys 2 persones per poder fer "
-            "el sorteig."
+            "Selecciona almenys 2 persones."
         )
 
     else:
@@ -418,9 +591,8 @@ with tab1:
 
         # ----------------------------------------------------
         # PESOS
-        # Més punts = MENYS probabilitat
         #
-        # p = 1 / punts^2
+        # Més punts = MENYS probabilitat
         # ----------------------------------------------------
 
         weights = []
@@ -464,10 +636,6 @@ with tab1:
 
         st.divider()
 
-        # ----------------------------------------------------
-        # SORTEIG
-        # ----------------------------------------------------
-
         if st.button(
             "🎰 SORTEJAR CONDUCTOR",
             type="primary",
@@ -480,13 +648,13 @@ with tab1:
                 k=1
             )[0]
 
-            winner = selected[winner_index]["name"]
+            winner = selected[
+                winner_index
+            ]["name"]
 
-            st.session_state["winner"] = winner
-
-        # ----------------------------------------------------
-        # RESULTAT
-        # ----------------------------------------------------
+            st.session_state[
+                "winner"
+            ] = winner
 
         if "winner" in st.session_state:
 
@@ -503,21 +671,23 @@ with tab1:
                 ">
                     <h1>🚗</h1>
                     <h2>FA COTXE...</h2>
-                    <h1>{st.session_state["winner"].upper()}</h1>
+                    <h1>
+                        {st.session_state["winner"].upper()}
+                    </h1>
                     <h3>🎉🎉🎉</h3>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-            st.write("")
-
             if st.button(
                 "🔄 Tornar a sortejar",
                 use_container_width=True
             ):
 
-                del st.session_state["winner"]
+                del st.session_state[
+                    "winner"
+                ]
 
                 st.rerun()
 
@@ -568,6 +738,37 @@ with tab2:
             key="add_round_trip"
         )
 
+    # --------------------------------------------------------
+    # NOU: PUNTS PERSONALITZATS
+    # --------------------------------------------------------
+
+    custom_mode = st.selectbox(
+        "💰 Punts per passatger",
+        [
+            "Per defecte",
+            "Personalitzat"
+        ],
+        key="custom_points_mode"
+    )
+
+    custom_points = None
+
+    if custom_mode == "Personalitzat":
+
+        custom_points = st.number_input(
+            "Punts que traspassa cada passatger "
+            "al conductor",
+            min_value=0.01,
+            step=0.5,
+            value=1.0,
+            key="custom_points_value"
+        )
+
+        st.caption(
+            "⚠️ Aquest valor preval sobre Festa "
+            "i Anada i tornada."
+        )
+
     trip_date = st.date_input(
         "📅 Data",
         date.today(),
@@ -580,29 +781,49 @@ with tab2:
     )
 
     # --------------------------------------------------------
-    # INFORMACIÓ DE PUNTS
+    # PREVISUALITZACIÓ
     # --------------------------------------------------------
 
     if passenger_names:
 
-        value = trip_value(
-            len(passenger_names),
-            party,
-            round_trip
-        )
+        if custom_points is not None:
 
-        loss = (
-            value
-            / len(passenger_names)
-        )
+            value = (
+                custom_points
+                * len(passenger_names)
+            )
 
-        st.info(
-            f"🚗 **{driver_name}: +{value:.1f} punts**\n\n"
-            f"👥 Cada passatger: **-{loss:.1f} punts**"
-        )
+            loss = custom_points
+
+            st.info(
+                f"🚗 **{driver_name}: "
+                f"+{value:.1f} punts**\n\n"
+                f"👥 Cada passatger: "
+                f"**-{loss:.1f} punts**"
+            )
+
+        else:
+
+            value = trip_value_default(
+                len(passenger_names),
+                party,
+                round_trip
+            )
+
+            loss = (
+                value
+                / len(passenger_names)
+            )
+
+            st.info(
+                f"🚗 **{driver_name}: "
+                f"+{value:.1f} punts**\n\n"
+                f"👥 Cada passatger: "
+                f"**-{loss:.1f} punts**"
+            )
 
     # --------------------------------------------------------
-    # BOTÓ
+    # CONTINUAR
     # --------------------------------------------------------
 
     if st.button(
@@ -614,7 +835,8 @@ with tab2:
         if not passenger_names:
 
             st.error(
-                "Has de seleccionar almenys un passatger."
+                "Has de seleccionar almenys "
+                "un passatger."
             )
 
         else:
@@ -627,7 +849,8 @@ with tab2:
                 "party": party,
                 "round_trip": round_trip,
                 "trip_date": trip_date,
-                "comment": comment
+                "comment": comment,
+                "custom_points": custom_points
             }
 
             st.rerun()
@@ -645,7 +868,7 @@ with tab2:
         st.divider()
 
         st.warning(
-            "⚠️ **CONFIRMA EL VIATGE**"
+            "⚠️ CONFIRMA EL VIATGE"
         )
 
         st.write(
@@ -673,33 +896,64 @@ with tab2:
             f"{'Sí' if pending['round_trip'] else 'No'}"
         )
 
+        if pending["custom_points"] is not None:
+
+            st.write(
+                f"💰 **Punts personalitzats:** "
+                f"{pending['custom_points']:.1f} "
+                f"per passatger"
+            )
+
+            total = (
+                pending["custom_points"]
+                * len(
+                    pending["passenger_names"]
+                )
+            )
+
+            st.success(
+                f"🚗 El conductor guanya "
+                f"**+{total:.1f} punts**"
+            )
+
+            st.warning(
+                f"👥 Cada passatger perd "
+                f"**-{pending['custom_points']:.1f} punts**"
+            )
+
+        else:
+
+            total = trip_value_default(
+                len(
+                    pending["passenger_names"]
+                ),
+                pending["party"],
+                pending["round_trip"]
+            )
+
+            loss = (
+                total
+                / len(
+                    pending["passenger_names"]
+                )
+            )
+
+            st.success(
+                f"🚗 El conductor guanya "
+                f"**+{total:.1f} punts**"
+            )
+
+            st.warning(
+                f"👥 Cada passatger perd "
+                f"**-{loss:.1f} punts**"
+            )
+
         if pending["comment"].strip():
 
             st.write(
                 f"💬 **Comentari:** "
                 f"{pending['comment']}"
             )
-
-        value = trip_value(
-            len(pending["passenger_names"]),
-            pending["party"],
-            pending["round_trip"]
-        )
-
-        loss = (
-            value
-            / len(pending["passenger_names"])
-        )
-
-        st.success(
-            f"🚗 {pending['driver_name']} "
-            f"guanya **+{value:.1f} punts**"
-        )
-
-        st.warning(
-            f"👥 Cada passatger perd "
-            f"**-{loss:.1f} punts**"
-        )
 
         col1, col2 = st.columns(2)
 
@@ -730,7 +984,9 @@ with tab2:
 
                 passenger_ids = [
                     get_friend_id(name)
-                    for name in pending["passenger_names"]
+                    for name in pending[
+                        "passenger_names"
+                    ]
                 ]
 
                 add_trip(
@@ -739,7 +995,8 @@ with tab2:
                     passenger_ids,
                     pending["round_trip"],
                     pending["party"],
-                    pending["comment"].strip()
+                    pending["comment"].strip(),
+                    pending["custom_points"]
                 )
 
                 del st.session_state[
@@ -763,10 +1020,207 @@ with tab2:
 
 
 # ============================================================
-# CLASSIFICACIÓ
+# TRADEO DE PUNTS
 # ============================================================
 
 with tab3:
+
+    st.header("💸 Tradeo de Punts")
+
+    st.write(
+        "Traspassa lliurement punts entre qualsevol "
+        "persona del grup."
+    )
+
+    names = [
+        name for _, name in friends
+    ]
+
+    from_name = st.selectbox(
+        "👤 Qui traspassa?",
+        names,
+        key="transfer_from"
+    )
+
+    to_names = [
+        name
+        for name in names
+        if name != from_name
+    ]
+
+    to_name = st.selectbox(
+        "➡️ A qui?",
+        to_names,
+        key="transfer_to"
+    )
+
+    transfer_points = st.number_input(
+        "💰 Quants punts?",
+        min_value=0.01,
+        step=0.5,
+        value=1.0,
+        key="transfer_points"
+    )
+
+    transfer_date = st.date_input(
+        "📅 Data",
+        date.today(),
+        key="transfer_date"
+    )
+
+    transfer_comment = st.text_area(
+        "💬 Comentari (opcional)",
+        key="transfer_comment"
+    )
+
+    st.info(
+        f"**{from_name}** → "
+        f"**{transfer_points:.1f} punts** → "
+        f"**{to_name}**"
+    )
+
+    if st.button(
+        "➡️ CONTINUAR",
+        type="primary",
+        use_container_width=True
+    ):
+
+        if transfer_points <= 0:
+
+            st.error(
+                "Els punts han de ser superiors a 0."
+            )
+
+        else:
+
+            st.session_state[
+                "pending_transfer"
+            ] = {
+                "from_name": from_name,
+                "to_name": to_name,
+                "points": transfer_points,
+                "date": transfer_date,
+                "comment": transfer_comment
+            }
+
+            st.rerun()
+
+    # --------------------------------------------------------
+    # CONFIRMACIÓ
+    # --------------------------------------------------------
+
+    if "pending_transfer" in st.session_state:
+
+        pending = st.session_state[
+            "pending_transfer"
+        ]
+
+        st.divider()
+
+        st.warning(
+            "⚠️ CONFIRMA EL TRADEO"
+        )
+
+        st.write(
+            f"👤 **Qui traspassa:** "
+            f"{pending['from_name']}"
+        )
+
+        st.write(
+            f"➡️ **Qui rep:** "
+            f"{pending['to_name']}"
+        )
+
+        st.write(
+            f"💰 **Punts:** "
+            f"{pending['points']:.1f}"
+        )
+
+        st.write(
+            f"📅 **Data:** "
+            f"{pending['date'].strftime('%d/%m/%Y')}"
+        )
+
+        if pending["comment"].strip():
+
+            st.write(
+                f"💬 **Comentari:** "
+                f"{pending['comment']}"
+            )
+
+        st.error(
+            f"⚠️ {pending['from_name']} "
+            f"perdrà {pending['points']:.1f} punts "
+            f"i {pending['to_name']} "
+            f"en guanyarà {pending['points']:.1f}."
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            if st.button(
+                "❌ CANCEL·LAR",
+                key="cancel_transfer",
+                use_container_width=True
+            ):
+
+                del st.session_state[
+                    "pending_transfer"
+                ]
+
+                st.rerun()
+
+        with col2:
+
+            if st.button(
+                "✅ CONFIRMAR TRADEO",
+                type="primary",
+                key="confirm_transfer",
+                use_container_width=True
+            ):
+
+                from_id = get_friend_id(
+                    pending["from_name"]
+                )
+
+                to_id = get_friend_id(
+                    pending["to_name"]
+                )
+
+                add_transfer(
+                    from_id,
+                    to_id,
+                    pending["points"],
+                    pending["date"],
+                    pending["comment"].strip()
+                )
+
+                del st.session_state[
+                    "pending_transfer"
+                ]
+
+                st.session_state[
+                    "transfer_added"
+                ] = True
+
+                st.rerun()
+
+    if st.session_state.pop(
+        "transfer_added",
+        False
+    ):
+
+        st.success(
+            "✅ TRADEO FET CORRECTAMENT!"
+        )
+
+
+# ============================================================
+# CLASSIFICACIÓ
+# ============================================================
+
+with tab4:
 
     st.header("🏆 Classificació")
 
@@ -783,10 +1237,6 @@ with tab3:
         key=lambda x: x["points"],
         reverse=True
     )
-
-    # --------------------------------------------------------
-    # PODI
-    # --------------------------------------------------------
 
     if len(ranking) >= 3:
 
@@ -817,10 +1267,6 @@ with tab3:
             )
 
     st.divider()
-
-    # --------------------------------------------------------
-    # CLASSIFICACIÓ COMPLETA
-    # --------------------------------------------------------
 
     for i, person in enumerate(ranking):
 
@@ -856,149 +1302,302 @@ with tab3:
 # HISTORIAL
 # ============================================================
 
-with tab4:
+with tab5:
 
-    st.header("📜 Historial de viatges")
+    st.header("📜 Historial")
 
-    history = get_history()
+    history_type = st.radio(
+        "Mostrar",
+        [
+            "🚗 Viatges",
+            "💸 Tradeos"
+        ],
+        horizontal=True
+    )
 
-    if not history:
+    # ========================================================
+    # HISTORIAL VIATGES
+    # ========================================================
 
-        st.info(
-            "Encara no hi ha cap viatge registrat."
-        )
+    if history_type == "🚗 Viatges":
 
-    for trip in history:
+        history = get_trip_history()
 
-        st.markdown(
-            f"### 🚗 {trip['driver']} "
-            f"— {trip['date']}"
-        )
+        if not history:
 
-        st.write(
-            "👥 **Passatgers:** "
-            + ", ".join(trip["passengers"])
-        )
+            st.info(
+                "Encara no hi ha cap viatge."
+            )
 
-        extras = []
+        for trip in history:
 
-        if trip["party"]:
-            extras.append("🎉 Festa")
-
-        if trip["round_trip"]:
-            extras.append("🔄 Anada i tornada")
-
-        if extras:
+            st.markdown(
+                f"### 🚗 {trip['driver']} "
+                f"— {trip['date']}"
+            )
 
             st.write(
-                " · ".join(extras)
+                "👥 **Passatgers:** "
+                + ", ".join(
+                    trip["passengers"]
+                )
             )
 
-        value = trip_value(
-            len(trip["passengers"]),
-            trip["party"],
-            trip["round_trip"]
-        )
+            extras = []
 
-        loss = (
-            value
-            / len(trip["passengers"])
-            if trip["passengers"]
-            else 0
-        )
+            if trip["party"]:
+                extras.append("🎉 Festa")
 
-        st.write(
-            f"💰 Conductor: **+{value:.1f}** "
-            f"· Passatgers: **-{loss:.1f} cadascun**"
-        )
+            if trip["round_trip"]:
+                extras.append(
+                    "🔄 Anada i tornada"
+                )
 
-        if trip["comment"]:
+            if extras:
 
-            st.caption(
-                f"💬 {trip['comment']}"
-            )
+                st.write(
+                    " · ".join(extras)
+                )
 
-        st.divider()
+            # ------------------------------------------------
+            # PUNTS
+            # ------------------------------------------------
 
-        # ----------------------------------------------------
-        # ELIMINAR
-        # ----------------------------------------------------
+            if trip["custom_points"] is not None:
 
-        if st.button(
-            "🗑️ ELIMINAR VIATGE",
-            key=f"delete_button_{trip['id']}",
-            use_container_width=True
+                custom = float(
+                    trip["custom_points"]
+                )
+
+                st.write(
+                    f"💰 **Personalitzat:** "
+                    f"{custom:.1f} punts "
+                    f"per passatger"
+                )
+
+                st.write(
+                    f"🚗 Conductor: "
+                    f"**+{custom * len(trip['passengers']):.1f}** "
+                    f"· Passatgers: "
+                    f"**-{custom:.1f} cadascun**"
+                )
+
+            else:
+
+                value = trip_value_default(
+                    len(trip["passengers"]),
+                    trip["party"],
+                    trip["round_trip"]
+                )
+
+                loss = (
+                    value
+                    / len(trip["passengers"])
+                    if trip["passengers"]
+                    else 0
+                )
+
+                st.write(
+                    f"💰 Conductor: "
+                    f"**+{value:.1f}** "
+                    f"· Passatgers: "
+                    f"**-{loss:.1f} cadascun**"
+                )
+
+            if trip["comment"]:
+
+                st.caption(
+                    f"💬 {trip['comment']}"
+                )
+
+            # ------------------------------------------------
+            # ELIMINAR
+            # ------------------------------------------------
+
+            if st.button(
+                "🗑️ ELIMINAR VIATGE",
+                key=f"delete_trip_{trip['id']}",
+                use_container_width=True
+            ):
+
+                st.session_state[
+                    "pending_delete_trip"
+                ] = trip["id"]
+
+                st.rerun()
+
+            if st.session_state.get(
+                "pending_delete_trip"
+            ) == trip["id"]:
+
+                st.warning(
+                    "⚠️ ESTÀS SEGUR QUE VOLS "
+                    "ELIMINAR AQUEST VIATGE?"
+                )
+
+                st.write(
+                    "Els punts es recalcularan "
+                    "automàticament."
+                )
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    if st.button(
+                        "❌ CANCEL·LAR",
+                        key=f"cancel_trip_{trip['id']}",
+                        use_container_width=True
+                    ):
+
+                        del st.session_state[
+                            "pending_delete_trip"
+                        ]
+
+                        st.rerun()
+
+                with col2:
+
+                    if st.button(
+                        "🗑️ SÍ, ELIMINAR",
+                        key=f"confirm_trip_{trip['id']}",
+                        type="primary",
+                        use_container_width=True
+                    ):
+
+                        delete_trip(
+                            trip["id"]
+                        )
+
+                        del st.session_state[
+                            "pending_delete_trip"
+                        ]
+
+                        st.session_state[
+                            "trip_deleted"
+                        ] = True
+
+                        st.rerun()
+
+            st.divider()
+
+        if st.session_state.pop(
+            "trip_deleted",
+            False
         ):
 
-            st.session_state[
-                "pending_delete"
-            ] = trip["id"]
+            st.success(
+                "✅ VIATGE ELIMINAT!"
+            )
 
-            st.rerun()
+    # ========================================================
+    # HISTORIAL TRADEOS
+    # ========================================================
 
-        # ----------------------------------------------------
-        # CONFIRMACIÓ ELIMINACIÓ
-        # ----------------------------------------------------
+    else:
 
-        if st.session_state.get(
-            "pending_delete"
-        ) == trip["id"]:
+        transfers = get_transfer_history()
 
-            st.warning(
-                "⚠️ **ESTÀS SEGUR QUE VOLS "
-                "ELIMINAR AQUEST VIATGE?**"
+        if not transfers:
+
+            st.info(
+                "Encara no hi ha cap tradeo."
+            )
+
+        for transfer in transfers:
+
+            st.markdown(
+                f"### 💸 "
+                f"{transfer['from']} → "
+                f"{transfer['to']}"
             )
 
             st.write(
-                "Els punts de tots els afectats "
-                "es recalcularan automàticament."
+                f"💰 **{transfer['points']:.1f} punts**"
             )
 
-            col1, col2 = st.columns(2)
+            st.write(
+                f"📅 {transfer['date']}"
+            )
 
-            with col1:
+            if transfer["comment"]:
 
-                if st.button(
-                    "❌ CANCEL·LAR",
-                    key=f"cancel_delete_{trip['id']}",
-                    use_container_width=True
-                ):
+                st.caption(
+                    f"💬 {transfer['comment']}"
+                )
 
-                    del st.session_state[
-                        "pending_delete"
-                    ]
+            if st.button(
+                "🗑️ ELIMINAR TRADEO",
+                key=f"delete_transfer_{transfer['id']}",
+                use_container_width=True
+            ):
 
-                    st.rerun()
+                st.session_state[
+                    "pending_delete_transfer"
+                ] = transfer["id"]
 
-            with col2:
+                st.rerun()
 
-                if st.button(
-                    "🗑️ SÍ, ELIMINAR",
-                    key=f"confirm_delete_{trip['id']}",
-                    type="primary",
-                    use_container_width=True
-                ):
+            if st.session_state.get(
+                "pending_delete_transfer"
+            ) == transfer["id"]:
 
-                    delete_trip(
-                        trip["id"]
-                    )
+                st.warning(
+                    "⚠️ ESTÀS SEGUR QUE VOLS "
+                    "ELIMINAR AQUEST TRADEO?"
+                )
 
-                    del st.session_state[
-                        "pending_delete"
-                    ]
+                st.write(
+                    "Els punts es recalcularan "
+                    "automàticament."
+                )
 
-                    st.session_state[
-                        "trip_deleted"
-                    ] = True
+                col1, col2 = st.columns(2)
 
-                    st.rerun()
+                with col1:
 
+                    if st.button(
+                        "❌ CANCEL·LAR",
+                        key=f"cancel_transfer_delete_{transfer['id']}",
+                        use_container_width=True
+                    ):
 
-    if st.session_state.pop(
-        "trip_deleted",
-        False
-    ):
+                        del st.session_state[
+                            "pending_delete_transfer"
+                        ]
 
-        st.success(
-            "✅ VIATGE ELIMINAT CORRECTAMENT!"
-        )
+                        st.rerun()
+
+                with col2:
+
+                    if st.button(
+                        "🗑️ SÍ, ELIMINAR",
+                        key=f"confirm_transfer_delete_{transfer['id']}",
+                        type="primary",
+                        use_container_width=True
+                    ):
+
+                        delete_transfer(
+                            transfer["id"]
+                        )
+
+                        del st.session_state[
+                            "pending_delete_transfer"
+                        ]
+
+                        st.session_state[
+                            "transfer_deleted"
+                        ] = True
+
+                        st.rerun()
+
+            st.divider()
+
+        if st.session_state.pop(
+            "transfer_deleted",
+            False
+        ):
+
+            st.success(
+                "✅ TRADEO ELIMINAT!"
+            )
